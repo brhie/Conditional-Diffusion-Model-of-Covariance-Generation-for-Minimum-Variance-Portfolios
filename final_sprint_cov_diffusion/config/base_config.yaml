@@ -1,0 +1,149 @@
+project:
+  name: "stabilized_conditional_diffusion_covariance_gmv"
+  random_seed: 42
+  output_dir: "results"
+
+data:
+  raw_file: "data/raw/crsp_daily.parquet"
+  cleaned_file: "data/interim/cleaned_crsp_daily.parquet"
+  use_common_shares_only: true
+  eligible_share_codes: [10, 11]
+  restrict_major_us_exchanges: true
+  eligible_exchange_codes: [1, 2, 3]
+  include_delisting_returns: true
+  market_cap_top_n: 500
+
+periods:
+  train:
+    start: "2000-01-01"
+    end: "2013-12-31"
+  validation:
+    start: "2014-01-01"
+    end: "2020-12-31"
+  test:
+    start: "2021-01-01"
+    end: "2025-12-31"
+
+rolling_windows:
+  lookback_days: 126
+  horizon_days: 21
+  rebalance_every_trading_days: 21
+  non_overlapping_holding_periods: true
+  assign_split_by_complete_target_window: true
+
+industry:
+  method: "sic_2digit"
+  group_size: 10
+
+groups:
+  training:
+    allow_overlap: true
+    target_groups_per_rebalance_date: 50
+    deterministic_seed: 42
+  evaluation:
+    allow_overlap: false
+    construction: "industry_then_market_cap_descending_sequential_blocks"
+    capital_allocation: "equal_weight_across_sleeves"
+
+covariance_transform:
+  method: "ridge_matrix_log_vech"
+  vector_dimension: 55
+  ridge_epsilon: 1.0e-8
+  standardize_condition_vectors: true
+  standardize_target_vectors: true
+  fit_scalers_on_training_only: true
+  average_generated_outputs_in_covariance_space: true
+  # Daily-sliding window for training data augmentation.
+  # stride=1 → one pair per trading day per group (~20x more data than stride=21).
+  # Set to 21 to revert to the original rebalance-date-only behaviour.
+  training_window_stride_days: 1
+
+model:
+  type: "conditional_ddpm"
+  noised_target_dim: 55
+  conditioning_dim: 55
+  time_embedding_dim: 32
+  hidden_dim: 128
+  num_hidden_layers: 3
+  activation: "silu"
+  dropout: 0.0
+
+training:
+  epochs: 200
+  batch_size: 128
+  optimizer: "adam"
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  fixed_epoch_training: true
+  beta_min: 0.0001
+  beta_max: 0.02
+  beta_schedule_grid:
+    - "linear"
+  diffusion_steps_grid:
+    - 400
+    - 800
+    - 1200
+    - 2000
+  random_seed: 42
+
+generation:
+  scenario_count_grid:
+    - 1
+    - 5
+    - 10
+    - 20
+    - 50
+  maximum_scenarios_generated: 50
+  use_common_random_numbers: true
+  use_nested_scenario_prefixes: true
+
+covariance_combination:
+  enabled: true
+  formula: "alpha * sample_covariance + (1 - alpha) * diffusion_expected_covariance"
+  alpha_grid:
+    - 0.00
+    - 0.25
+    - 0.50
+    - 0.75
+    - 1.00
+  alpha_one_is_single_sample_covariance_boundary: true
+
+portfolio:
+  objective: "long_only_gmv"
+  long_only: true
+  fully_invested: true
+  sleeve_capital_allocation: "equal"
+  optimization_solver: "clarabel"
+  transaction_cost_bps_main: 10
+  transaction_cost_bps_sensitivity: [0, 5, 10, 20]
+
+validation:
+  selection_metric: "gross_annualized_realized_gmv_portfolio_volatility"
+  use_only_selection_metric_for_model_choice: true
+  select_single_primary_model: true
+  report_top_k_configurations: 5
+  tie_tolerance: 1.0e-8
+  tie_breaking_order:
+    - "larger_alpha"
+    - "smaller_M"
+    - "smaller_T"
+
+benchmarks:
+  equal_weight: true
+  sample_covariance_gmv: true
+  ledoit_wolf_linear_shrinkage_gmv: true
+  ledoit_wolf_nonlinear_shrinkage_gmv: false
+
+ablations:
+  pure_diffusion_alpha_zero: true
+  single_scenario_M_one: true
+  pure_sample_covariance_alpha_one: true
+
+reporting:
+  report_gross_results: true
+  report_net_results: true
+  report_transaction_cost_sensitivity: true
+  report_scenario_dispersion: true
+  report_covariance_forecast_diagnostics: true
+  report_weight_concentration: true
+  report_numerical_repairs: true

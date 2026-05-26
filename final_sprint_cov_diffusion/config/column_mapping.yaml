@@ -1,0 +1,57 @@
+# CRSP Column Mapping
+# -----------------------------------------------------------------------
+# Canonical field -> raw CRSP column name.
+# Edit the "raw_name" entries to match whatever column names appear in
+# the CRSP extract that was downloaded from WRDS.  The pipeline reads
+# this file before any processing so that all downstream code uses the
+# canonical names regardless of the CRSP file layout.
+#
+# Set "available: false" for any field that is absent in the extract.
+# The pipeline will log a warning and apply the documented fallback.
+# -----------------------------------------------------------------------
+
+mapping:
+  date:
+    raw_name: "date"
+    available: true
+    description: "Trading date"
+
+  permno:
+    raw_name: "PERMNO"
+    available: true
+    description: "CRSP permanent security identifier"
+
+  ret:
+    raw_name: "RET"
+    available: true
+    description: "Daily holding-period return (as received from CRSP)"
+
+  dlret:
+    raw_name: "DLRET"
+    available: true
+    description: "Delisting return"
+
+  prc:
+    raw_name: "PRC"
+    available: true
+    description: "Price (may be negative for bid/ask midpoints)"
+
+  shrout:
+    raw_name: "SHROUT"
+    available: true
+    description: "Shares outstanding (thousands)"
+
+  shrcd:
+    raw_name: "SHRCD"
+    available: true
+    description: "Share code — filter to {10, 11} for ordinary common shares"
+
+  exchcd:
+    raw_name: "EXCHCD"
+    available: true
+    description: "Exchange code — filter to {1, 2, 3} for major U.S. exchanges"
+
+  siccd:
+    raw_name: "SICCD"
+    available: true
+    description: "Standard Industrial Classification code"
