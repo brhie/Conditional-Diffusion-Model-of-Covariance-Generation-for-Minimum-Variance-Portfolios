@@ -1,0 +1,13 @@
+selected_denoising_model:
+  diffusion_steps_T: 50
+  draws_M: 20
+  rho: 0.1
+  schedule_type: quadratic
+  test_period_locked:
+  - '2021-01-01'
+  - '2025-12-31'
+  validation_annualized_realized_volatility: 0.16013616636592887
+  validation_metric: gross_annualized_realized_gmv_portfolio_volatility
+  validation_period:
+  - '2014-01-01'
+  - '2020-12-31'

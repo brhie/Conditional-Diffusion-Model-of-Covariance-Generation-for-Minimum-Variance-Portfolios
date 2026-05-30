@@ -189,8 +189,10 @@ def p_sample_loop(
         c_tilde = c_tilde.unsqueeze(0)
     c_tilde = c_tilde.expand(num_samples, -1).to(device)
 
-    # Start from pure Gaussian noise
-    y = torch.randn(num_samples, c_tilde.shape[-1], device=device)
+    # Start from pure Gaussian noise — noised target dim is 55 (vech of 10×10 cov),
+    # NOT c_tilde.shape[-1] (which is the conditioning dim = 55 + K macro features).
+    noised_dim = 55
+    y = torch.randn(num_samples, noised_dim, device=device)
 
     for s_idx in range(scheduler.T, 0, -1):
         s_tensor = torch.full((num_samples,), s_idx, dtype=torch.long, device=device)

@@ -179,7 +179,8 @@ def build_daily_sliding_pairs_for_group(
 
     Returns
     -------
-    List of (S_hist, S_fwd) ndarray pairs — one per valid anchor date.
+    List of (anchor_idx, S_hist, S_fwd) triples — one per valid anchor date.
+    anchor_idx is the integer position in *trading_dates* of the anchor date.
     """
     if not permnos or not anchor_indices:
         return []
@@ -227,7 +228,7 @@ def build_daily_sliding_pairs_for_group(
 
         S_hist = np.cov(R_hist.T)
         S_fwd  = np.cov(R_fwd.T)
-        pairs.append((S_hist, S_fwd))
+        pairs.append((anc_idx, S_hist, S_fwd))
 
     return pairs
 

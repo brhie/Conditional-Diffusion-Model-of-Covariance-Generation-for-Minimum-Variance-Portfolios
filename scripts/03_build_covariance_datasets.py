@@ -31,6 +31,11 @@ from src.datasets import (
     build_daily_sliding_covariance_dataset,
     save_dataset,
 )
+from src.macro_features import (
+    build_macro_feature_df,
+    load_macro_feature_names,
+    save_macro_feature_names,
+)
 from src.transforms import fit_training_scalers
 from src.utils import get_logger
 
@@ -50,8 +55,12 @@ def main() -> None:
     lkb = cfg.rolling_windows["lookback_days"]
     hor = cfg.rolling_windows["horizon_days"]
 
+    macro_cfg = cfg.get("macro_features", {})
+    use_macro = macro_cfg.get("enabled", True)
+
     logger.info("=" * 60)
     logger.info("STEP 3 – Build covariance datasets")
+    logger.info("Macro features enabled: %s", use_macro)
     logger.info("=" * 60)
 
     # ---- Load data -------------------------------------------------------
@@ -78,6 +87,38 @@ def main() -> None:
         reb_df[reb_df["split"] == "test"]["rebalance_date"].tolist()
     )
 
+    # ---- Macro features --------------------------------------------------
+    macro_df = None
+    if use_macro:
+        macro_cache_path = interim_dir / "macro_features.parquet"
+        if macro_cache_path.exists():
+            logger.info("Loading cached macro features from %s", macro_cache_path)
+            macro_df = pd.read_parquet(macro_cache_path)
+            macro_df.index = pd.to_datetime(macro_df.index)
+        else:
+            logger.info("Computing macro features for all trading dates …")
+            external_path = macro_cfg.get("external_data_file",
+                                          "data/interim/macro_external.parquet")
+            min_stocks = macro_cfg.get("min_stocks_corr", 20)
+            macro_df = build_macro_feature_df(
+                crsp_df=crsp_df,
+                trading_dates=trading_dates,
+                external_path=external_path,
+                min_stocks_corr=min_stocks,
+            )
+            macro_df.to_parquet(macro_cache_path)
+            logger.info(
+                "Saved macro features: %d dates, %d features → %s",
+                len(macro_df), macro_df.shape[1], macro_cache_path,
+            )
+
+        active_feature_names = list(macro_df.columns)
+        save_macro_feature_names(active_feature_names, scaler_dir)
+        logger.info("Active macro features (%d): %s", len(active_feature_names),
+                    active_feature_names)
+    else:
+        logger.info("Macro features disabled; condition_dim will be 55.")
+
     # ---- Training dataset (daily-sliding window) -------------------------
     stride = cfg["covariance_transform"].get("training_window_stride_days", 1)
     train_end = pd.Timestamp(cfg["periods"]["train"]["end"])
@@ -95,6 +136,7 @@ def main() -> None:
         horizon_days=hor,
         ridge_epsilon=ridge_eps,
         stride=stride,
+        macro_df=macro_df,
     )
     logger.info(
         "Training: %d pairs, cond_vech shape %s",
@@ -129,6 +171,7 @@ def main() -> None:
         lookback_days=lkb,
         horizon_days=hor,
         ridge_epsilon=ridge_eps,
+        macro_df=macro_df,
     )
     val_ds = apply_scalers(val_ds, cond_scaler, tgt_scaler)
     save_dataset(val_ds, processed_dir / "covariance_pairs_validation.npz")
@@ -149,6 +192,7 @@ def main() -> None:
         lookback_days=lkb,
         horizon_days=hor,
         ridge_epsilon=ridge_eps,
+        macro_df=macro_df,
     )
     test_ds = apply_scalers(test_ds, cond_scaler, tgt_scaler)
     save_dataset(test_ds, processed_dir / "covariance_pairs_test.npz")

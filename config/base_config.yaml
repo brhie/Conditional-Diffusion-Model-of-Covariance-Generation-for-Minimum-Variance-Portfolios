@@ -58,9 +58,36 @@ covariance_transform:
   # Set to 21 to revert to the original rebalance-date-only behaviour.
   training_window_stride_days: 1
 
+macro_features:
+  # Toggle macro conditioning features on/off.
+  # When enabled, the conditioning vector expands from 55 to 55+K dims.
+  enabled: true
+  # CRSP-derived features (always available if enabled=true).
+  # Research: Andersen et al. (2003) HAR-RV; Black (1976) leverage effect;
+  #           Pollet & Wilson (2010) avg correlation; Corsi (2009) long-memory.
+  crsp_features:
+    - "log_mkt_var_21d"        # log realized EW market variance, 21-day
+    - "log_mkt_var_126d"       # log realized EW market variance, 126-day
+    - "mkt_ret_21d"            # cumulative EW return, 21-day (leverage effect)
+    - "avg_pairwise_corr_126d" # implied equicorrelation, 126-day
+  # External features from FRED (optional; requires running scripts/00_download_macro_data.py).
+  # Research: Engle & Figlewski (2012) VIX; Estrella & Mishkin (1998) term spread;
+  #           Gilchrist & Zakrajsek (2012) credit spread.
+  external_features:
+    - "log_vix"        # log(VIX) – FRED VIXCLS
+    - "term_spread"    # 10Y-2Y Treasury yield (%) – FRED DGS10 minus DGS2
+    - "credit_spread"  # IG OAS (%) – FRED BAMLC0A0CMEY
+  external_data_file: "data/interim/macro_external.parquet"
+  min_stocks_corr: 20  # minimum eligible stocks for equicorrelation computation
+
 model:
   type: "conditional_ddpm"
   noised_target_dim: 55
+  # conditioning_dim is set automatically at training time:
+  #   55 (covariance log-vech) + K (active macro features)
+  # With all 7 macro features: 62.  With CRSP-only (4 features): 59.
+  # With macro_features.enabled=false: 55.
+  # This field is informational; the actual value is read from the dataset.
   conditioning_dim: 55
   time_embedding_dim: 32
   hidden_dim: 128

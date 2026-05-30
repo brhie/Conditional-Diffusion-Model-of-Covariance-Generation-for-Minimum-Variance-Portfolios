@@ -5,6 +5,11 @@ Build and manage the covariance input/target datasets for training,
 validation, and testing.
 
 Spec §12–13.
+
+When a macro_df is supplied to the build functions the condition_vech is
+extended: condition_vech[:, :55] is the log-vech of the historical covariance
+and condition_vech[:, 55:] are the raw macro features for that date.
+The conditioning_scaler is fitted on the full combined vector (training only).
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ import pandas as pd
 
 from .covariance import build_covariance_pair, build_daily_sliding_pairs_for_group
 from .groups import get_sleeve_permnos
+from .macro_features import get_macro_vector
 from .transforms import (
     batch_covariance_to_log_vech,
     fit_training_scalers,
@@ -42,6 +48,7 @@ def build_covariance_dataset(
     lookback_days: int = 126,
     horizon_days: int = 21,
     ridge_epsilon: float = 1e-8,
+    macro_df: Optional[pd.DataFrame] = None,
 ) -> Dict:
     """
     For each group/sleeve at each rebalance date, compute:
@@ -52,11 +59,13 @@ def build_covariance_dataset(
     {
       "condition_raw":  np.ndarray (n, 10, 10),
       "target_raw":     np.ndarray (n, 10, 10),
-      "condition_vech": np.ndarray (n, 55),
+      "condition_vech": np.ndarray (n, 55+K),   # K = 0 if macro_df is None
       "target_vech":    np.ndarray (n, 55),
       "metadata":       pd.DataFrame with columns:
                         [group_id, rebalance_date, industry, permno_list]
     }
+    macro_df (optional): if supplied, the last K columns of condition_vech
+    are the raw macro features for the rebalance date of each sample.
     """
     conditions_raw = []
     targets_raw = []
@@ -110,8 +119,17 @@ def build_covariance_dataset(
 
     cond_arr = np.stack(conditions_raw, axis=0)      # (n, 10, 10)
     tgt_arr = np.stack(targets_raw, axis=0)           # (n, 10, 10)
-    cond_vech = batch_covariance_to_log_vech(cond_arr, ridge_epsilon)
-    tgt_vech = batch_covariance_to_log_vech(tgt_arr, ridge_epsilon)
+    cond_vech = batch_covariance_to_log_vech(cond_arr, ridge_epsilon)  # (n, 55)
+    tgt_vech = batch_covariance_to_log_vech(tgt_arr, ridge_epsilon)    # (n, 55)
+
+    # Append macro features to condition_vech if supplied
+    if macro_df is not None:
+        rebalance_dates = [row[rebalance_date_col] for row in metadata_rows]
+        macro_arr = np.stack(
+            [get_macro_vector(macro_df, pd.Timestamp(d)) for d in rebalance_dates],
+            axis=0,
+        )  # (n, K)
+        cond_vech = np.concatenate([cond_vech, macro_arr], axis=1)  # (n, 55+K)
 
     meta = pd.DataFrame(metadata_rows)
 
@@ -142,6 +160,7 @@ def build_daily_sliding_covariance_dataset(
     horizon_days: int = 21,
     ridge_epsilon: float = 1e-8,
     stride: int = 1,
+    macro_df: Optional[pd.DataFrame] = None,
 ) -> Dict:
     """
     Build training covariance pairs using a *daily sliding window*.
@@ -190,9 +209,10 @@ def build_daily_sliding_covariance_dataset(
         hi = min(end_idx, max_anchor_idx + 1)
         return list(range(lo, hi, stride))
 
-    conditions_raw: list[np.ndarray] = []
-    targets_raw:    list[np.ndarray] = []
-    metadata_rows:  list[dict]       = []
+    conditions_raw: list[np.ndarray]   = []
+    targets_raw:    list[np.ndarray]   = []
+    anchor_dates_list: list[pd.Timestamp] = []
+    metadata_rows:  list[dict]         = []
 
     group_ids = sorted(groups_df["group_id"].unique())
     logger.info(
@@ -234,13 +254,16 @@ def build_daily_sliding_covariance_dataset(
             horizon_days=horizon_days,
         )
 
-        for S_hist, S_fwd in pairs:
+        for anc_idx, S_hist, S_fwd in pairs:
+            anchor_date = pd.Timestamp(td_arr[anc_idx])
             conditions_raw.append(S_hist)
             targets_raw.append(S_fwd)
+            anchor_dates_list.append(anchor_date)
             metadata_rows.append(
                 {
                     "group_id": gid,
                     "rebalance_date": reb_date,
+                    "anchor_date": anchor_date,
                     "industry": industry,
                     "permno_list": permnos,
                 }
@@ -267,8 +290,17 @@ def build_daily_sliding_covariance_dataset(
 
     cond_arr = np.stack(conditions_raw, axis=0)   # (n, 10, 10)
     tgt_arr  = np.stack(targets_raw,   axis=0)    # (n, 10, 10)
-    cond_vech = batch_covariance_to_log_vech(cond_arr, ridge_epsilon)
-    tgt_vech  = batch_covariance_to_log_vech(tgt_arr,  ridge_epsilon)
+    cond_vech = batch_covariance_to_log_vech(cond_arr, ridge_epsilon)  # (n, 55)
+    tgt_vech  = batch_covariance_to_log_vech(tgt_arr,  ridge_epsilon)  # (n, 55)
+
+    # Append macro features to condition_vech if supplied
+    if macro_df is not None:
+        macro_arr = np.stack(
+            [get_macro_vector(macro_df, d) for d in anchor_dates_list],
+            axis=0,
+        )  # (n, K)
+        cond_vech = np.concatenate([cond_vech, macro_arr], axis=1)  # (n, 55+K)
+
     meta = pd.DataFrame(metadata_rows)
 
     logger.info(
@@ -384,3 +416,22 @@ class CovariancePairDataset:
 
     def __getitem__(self, idx: int):
         return self.conditions[idx], self.targets[idx]
+
+
+class CovarianceVecDataset:
+    """
+    Minimal dataset returning single standardized covariance vectors.
+    Used to train the unconditional DDPM denoiser on condition_scaled vectors.
+    """
+
+    def __init__(self, dataset: Dict):
+        import torch
+        self.vectors = torch.tensor(
+            dataset["condition_scaled"], dtype=torch.float32
+        )
+
+    def __len__(self) -> int:
+        return len(self.vectors)
+
+    def __getitem__(self, idx: int):
+        return self.vectors[idx]

@@ -58,6 +58,7 @@ from src.backtest import run_one_rebalance
 from src.config import get_config
 from src.covariance import build_covariance_pair
 from src.diffusion import DDPMScheduler
+from src.macro_features import get_macro_vector, load_macro_feature_names
 from src.generate import (
     combine_covariances,
     deterministic_scenario_seed,
@@ -182,6 +183,28 @@ def main() -> None:
     ].copy()
 
     cond_scaler, tgt_scaler = load_scalers(scaler_dir)
+
+    # ---- Load macro features (if enabled) --------------------------------
+    macro_df = None
+    macro_feature_names = load_macro_feature_names(scaler_dir)
+    if macro_feature_names:
+        macro_path = Path("data/interim/macro_features.parquet")
+        if macro_path.exists():
+            macro_df = pd.read_parquet(macro_path)
+            macro_df.index = pd.to_datetime(macro_df.index)
+            # Keep only the features active at training time
+            macro_df = macro_df[[c for c in macro_feature_names if c in macro_df.columns]]
+            logger.info(
+                "Loaded macro features for validation: %d dates, %d features",
+                len(macro_df), macro_df.shape[1],
+            )
+        else:
+            logger.warning(
+                "macro_features.parquet not found at %s; "
+                "generating scenarios WITHOUT macro conditioning. "
+                "Re-run script 03 to rebuild.",
+                macro_path,
+            )
 
     lkb = cfg.rolling_windows["lookback_days"]
     hor = cfg.rolling_windows["horizon_days"]
@@ -360,13 +383,20 @@ def main() -> None:
                     logger.debug("log_vech failed for sleeve %d at %s: %s", sid, date.date(), exc)
                     continue
 
+                # Append macro features to form the full conditioning vector
+                if macro_df is not None:
+                    macro_vec = get_macro_vector(macro_df, date)
+                    condition_vector_raw = np.concatenate([cov_vech, macro_vec])
+                else:
+                    condition_vector_raw = cov_vech
+
                 gen_seed = deterministic_scenario_seed(
                     schedule_type, T, date, sid, base_seed=seed
                 )
                 scenarios = generate_covariance_scenarios(
                     model=model,
                     scheduler=scheduler,
-                    condition_vector_raw=cov_vech,
+                    condition_vector_raw=condition_vector_raw,
                     conditioning_scaler=cond_scaler,
                     target_scaler=tgt_scaler,
                     num_scenarios=M_max,

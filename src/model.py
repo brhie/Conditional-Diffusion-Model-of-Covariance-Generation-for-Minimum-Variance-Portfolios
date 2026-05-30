@@ -142,3 +142,76 @@ def build_model(
         num_hidden=num_hidden,
         dropout=dropout,
     )
+
+
+# ---------------------------------------------------------------------------
+# Unconditional MLP denoiser  (DDPM covariance denoiser / regularizer)
+# ---------------------------------------------------------------------------
+
+class UnconditionalMLPDenoiser(nn.Module):
+    """
+    Predict the noise epsilon given (y_s, s) – no external conditioning vector.
+
+    Used for SDEdit-style covariance regularization: the model learns the
+    distribution of historical 126-day sample covariance matrices in log-vech
+    space and is applied at inference by partially noising the observed
+    covariance and reverse-denoising.
+
+    Architecture mirrors the conditional denoiser but omits the conditioning
+    input: input dim = noised_dim + time_embed_dim.
+    """
+
+    def __init__(
+        self,
+        noised_dim: int = 55,
+        time_embed_dim: int = 32,
+        hidden_dim: int = 128,
+        num_hidden: int = 3,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.time_embedding = SinusoidalTimeEmbedding(embed_dim=time_embed_dim)
+        input_dim = noised_dim + time_embed_dim
+
+        layers: list[nn.Module] = []
+        in_dim = input_dim
+        for _ in range(num_hidden):
+            layers.append(nn.Linear(in_dim, hidden_dim))
+            layers.append(nn.SiLU())
+            if dropout > 0.0:
+                layers.append(nn.Dropout(dropout))
+            in_dim = hidden_dim
+        layers.append(nn.Linear(hidden_dim, noised_dim))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, y_s: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        y_s : (batch, 55) – noised covariance vector at step s
+        t   : (batch,)    – diffusion step indices (1-indexed)
+
+        Returns
+        -------
+        eps_hat : (batch, 55) – predicted noise
+        """
+        t_emb = self.time_embedding(t)          # (batch, time_embed_dim)
+        x = torch.cat([y_s, t_emb], dim=-1)     # (batch, noised_dim + time_embed_dim)
+        return self.net(x)
+
+
+def build_denoising_model(
+    noised_dim: int = 55,
+    time_embed_dim: int = 32,
+    hidden_dim: int = 128,
+    num_hidden: int = 3,
+    dropout: float = 0.0,
+) -> UnconditionalMLPDenoiser:
+    """Construct and return an UnconditionalMLPDenoiser."""
+    return UnconditionalMLPDenoiser(
+        noised_dim=noised_dim,
+        time_embed_dim=time_embed_dim,
+        hidden_dim=hidden_dim,
+        num_hidden=num_hidden,
+        dropout=dropout,
+    )

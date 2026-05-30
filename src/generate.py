@@ -16,6 +16,7 @@ import numpy as np
 import torch
 
 from .diffusion import DDPMScheduler, p_sample_loop
+from .model import UnconditionalMLPDenoiser
 from .transforms import load_scalers, log_vech_to_covariance
 
 logger = logging.getLogger(__name__)
@@ -122,6 +123,150 @@ def generate_covariance_scenarios(
 # ---------------------------------------------------------------------------
 # Combine generated covariances with historical sample covariance
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# SDEdit-style partial noising + reverse denoising (unconditional)
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def p_sample_loop_partial(
+    model: UnconditionalMLPDenoiser,
+    scheduler: DDPMScheduler,
+    y_start: torch.Tensor,
+    s_start: int,
+) -> torch.Tensor:
+    """
+    Run the unconditional DDPM reverse chain from s_start down to 0.
+
+    Parameters
+    ----------
+    model   : UnconditionalMLPDenoiser (in eval mode on device)
+    scheduler : DDPMScheduler
+    y_start : (num_draws, 55) – already noisy at diffusion step s_start
+    s_start : int – 1-indexed starting step (must be >= 1)
+
+    Returns
+    -------
+    torch.Tensor, shape (num_draws, 55) – denoised vectors at step 0
+    """
+    model.eval()
+    device = next(model.parameters()).device
+    y = y_start.to(device)
+    num_draws = y.shape[0]
+
+    for s_idx in range(s_start, 0, -1):
+        s_tensor = torch.full((num_draws,), s_idx, dtype=torch.long, device=device)
+
+        eps_hat = model(y, s_tensor)
+
+        alpha_s = scheduler.alphas[s_idx - 1]
+        alpha_bar_s = scheduler.alpha_bar[s_idx - 1]
+        sqrt_one_minus_ab = scheduler.sqrt_one_minus_alpha_bar[s_idx - 1]
+
+        x0_hat = (y - sqrt_one_minus_ab * eps_hat) / torch.sqrt(alpha_bar_s)
+        x0_hat = x0_hat.clamp(-10.0, 10.0)
+
+        if s_idx > 1:
+            alpha_bar_prev = scheduler.alpha_bar[s_idx - 2]
+            posterior_mean = (
+                torch.sqrt(alpha_bar_prev) * scheduler.betas[s_idx - 1] / (1.0 - alpha_bar_s) * x0_hat
+                + torch.sqrt(alpha_s) * (1.0 - alpha_bar_prev) / (1.0 - alpha_bar_s) * y
+            )
+            posterior_var = scheduler.posterior_variance[s_idx - 1]
+            noise = torch.randn_like(y)
+            y = posterior_mean + torch.sqrt(posterior_var) * noise
+        else:
+            y = x0_hat
+
+    return y  # (num_draws, 55)
+
+
+def generate_denoised_covariances(
+    model: UnconditionalMLPDenoiser,
+    scheduler: DDPMScheduler,
+    condition_vector_raw: np.ndarray,
+    conditioning_scaler,
+    rho: float,
+    num_draws: int = 1,
+    seed: Optional[int] = None,
+    device: Optional[str | torch.device] = None,
+) -> List[np.ndarray]:
+    """
+    SDEdit-style partial denoising of an observed historical covariance matrix.
+
+    Treats the trained unconditional DDPM as a learned regularizer.  At each
+    call the observed covariance is corrupted to diffusion step s_start (mild
+    noise) and then reverse-denoised, producing a covariance matrix that lies
+    closer to the learned distribution while retaining the structure of the
+    observed one.
+
+    Parameters
+    ----------
+    model : UnconditionalMLPDenoiser (already in eval mode on device)
+    scheduler : DDPMScheduler
+    condition_vector_raw : (55,) log-vech of observed 126-day sample covariance
+                           (NOT yet standardized)
+    conditioning_scaler : fitted sklearn StandardScaler (same one used in Phase 3)
+    rho : float in (0, 1]  –  denoising strength = starting_step / T
+          s_start = max(1, round(rho * T))
+    num_draws : int – M independent draws averaged in covariance space
+    seed : deterministic seed (per sleeve-date, like the forecasting model)
+    device : torch device or None
+
+    Returns
+    -------
+    List of num_draws np.ndarray each of shape (10, 10) – denoised SPD covariance matrices.
+    The caller should average these in covariance space for M > 1.
+    """
+    if rho <= 0.0:
+        raise ValueError(
+            "rho must be > 0.  For rho=0 use the raw sample covariance directly."
+        )
+
+    s_start = max(1, round(rho * scheduler.T))
+
+    if device is None:
+        device = next(model.parameters()).device
+    device = torch.device(device)
+
+    # Standardize the observed covariance log-vech using the conditioning scaler
+    c_raw = condition_vector_raw.reshape(1, -1)
+    y0_scaled = conditioning_scaler.transform(c_raw)           # (1, 55)
+    y0_tensor = torch.tensor(y0_scaled, dtype=torch.float32, device=device)
+    y0_tensor = y0_tensor.expand(num_draws, -1).clone()         # (num_draws, 55)
+
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    # Forward-corrupt to s_start: each draw gets an independent noise sample
+    alpha_bar_s = scheduler.alpha_bar[s_start - 1]
+    sqrt_ab = torch.sqrt(alpha_bar_s)
+    sqrt_1_ab = torch.sqrt(1.0 - alpha_bar_s)
+    eps_fwd = torch.randn_like(y0_tensor)
+    y_corrupted = sqrt_ab * y0_tensor + sqrt_1_ab * eps_fwd    # (num_draws, 55)
+
+    # Reverse-denoise from s_start to 0
+    y_denoised = p_sample_loop_partial(model, scheduler, y_corrupted, s_start)
+
+    # Inverse-standardize with the conditioning scaler
+    y_np = y_denoised.cpu().numpy()                             # (num_draws, 55)
+    y_unscaled = conditioning_scaler.inverse_transform(y_np)    # (num_draws, 55)
+
+    # Reconstruct SPD covariance matrices
+    covariances: List[np.ndarray] = []
+    for i in range(num_draws):
+        try:
+            cov = log_vech_to_covariance(y_unscaled[i])
+            covariances.append(cov)
+        except Exception as exc:
+            logger.warning(
+                "Denoised covariance reconstruction failed (draw %d): %s. "
+                "Using identity fallback.", i, exc
+            )
+            covariances.append(np.eye(10) * 1e-4)
+
+    return covariances
+
 
 def combine_covariances(
     sample_cov: np.ndarray,

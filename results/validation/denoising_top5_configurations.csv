@@ -1,0 +1,6 @@
+schedule_type,diffusion_steps_T,rho,draws_M,validation_annualized_realized_volatility,is_sample_covariance_boundary,rank,selected_primary_model
+quadratic,50.0,0.1,20.0,0.16013616636592887,False,1,True
+quadratic,50.0,0.05,20.0,0.16014495032798656,False,2,False
+linear,25.0,0.05,20.0,0.16015576173681872,False,3,False
+linear,25.0,0.05,1.0,0.16015793867363978,False,4,False
+quadratic,25.0,0.05,20.0,0.1601625217108249,False,5,False

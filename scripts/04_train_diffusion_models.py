@@ -47,9 +47,11 @@ def main() -> None:
     # ---- Load training data ----------------------------------------------
     logger.info("Loading training dataset …")
     train_ds = load_dataset(processed_dir / "covariance_pairs_train.npz")
+    condition_dim = int(train_ds["condition_scaled"].shape[1])
     logger.info(
-        "Training pairs: %d, cond shape %s",
+        "Training pairs: %d, cond shape %s (condition_dim=%d, macro_K=%d)",
         len(train_ds["condition_scaled"]), train_ds["condition_scaled"].shape,
+        condition_dim, condition_dim - 55,
     )
 
     # ---- Grid of model configs to train -----------------------------------
@@ -93,6 +95,7 @@ def main() -> None:
                 weight_decay=cfg.training["weight_decay"],
                 seed=seed,
                 save_dir=None,
+                condition_dim=condition_dim,
             )
 
             import torch
@@ -107,6 +110,7 @@ def main() -> None:
                     "time_embed_dim": cfg.model["time_embedding_dim"],
                     "dropout": cfg.model["dropout"],
                     "epochs_trained": cfg.training["epochs"],
+                    "condition_dim": condition_dim,
                 },
                 ckpt_path,
             )

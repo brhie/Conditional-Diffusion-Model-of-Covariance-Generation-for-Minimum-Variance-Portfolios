@@ -54,6 +54,7 @@ from src.metrics import (
     compute_all_metrics,
     volatility_reduction_vs_sample_gmv,
 )
+from src.macro_features import get_macro_vector, load_macro_feature_names
 from src.train import load_trained_model
 from src.transforms import covariance_to_log_vech, load_scalers
 from src.turnover import apply_transaction_costs, compute_turnover
@@ -190,6 +191,27 @@ def main() -> None:
     lkb = cfg.rolling_windows["lookback_days"]
     hor = cfg.rolling_windows["horizon_days"]
 
+    # ---- Load macro features (must match features used at training time) --
+    macro_df = None
+    macro_feature_names = load_macro_feature_names(scaler_dir)
+    if macro_feature_names:
+        macro_path = interim_dir / "macro_features.parquet"
+        if macro_path.exists():
+            macro_df = pd.read_parquet(macro_path)
+            macro_df.index = pd.to_datetime(macro_df.index)
+            macro_df = macro_df[[c for c in macro_feature_names if c in macro_df.columns]]
+            logger.info(
+                "Loaded macro features for test: %d dates, %d features %s",
+                len(macro_df), macro_df.shape[1], list(macro_df.columns),
+            )
+        else:
+            logger.warning(
+                "macro_features.parquet not found – test scenarios will be "
+                "generated WITHOUT macro conditioning. "
+                "This will produce incorrect results if the model was trained "
+                "with macro features. Re-run script 03 to fix."
+            )
+
     # ---- Pre-compute sleeve data -----------------------------------------
     logger.info("Pre-computing test sleeve data …")
     sleeve_data: Dict[Tuple, Dict] = {}
@@ -245,10 +267,18 @@ def main() -> None:
                 cov_vech = covariance_to_log_vech(data["S_hist"], cfg.ridge_epsilon)
             except Exception:
                 continue
+
+            # Append macro features to match training-time condition vector
+            if macro_df is not None:
+                macro_vec = get_macro_vector(macro_df, date)
+                condition_vector_raw = np.concatenate([cov_vech, macro_vec])
+            else:
+                condition_vector_raw = cov_vech
+
             gen_seed = deterministic_scenario_seed(sched, T_sel, date, sid, cfg.random_seed)
             scenarios = generate_covariance_scenarios(
                 model=model, scheduler=scheduler,
-                condition_vector_raw=cov_vech,
+                condition_vector_raw=condition_vector_raw,
                 conditioning_scaler=cond_scaler,
                 target_scaler=tgt_scaler,
                 num_scenarios=M_max,
